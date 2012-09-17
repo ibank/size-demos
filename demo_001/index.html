@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<head>
+	<title>Size.IO Live Pub/Sub Graph Demo</title>
+	<style>
+		@import url(//fonts.googleapis.com/css?family=Yanone+Kaffeesatz:400,700);
+		@import url(style.css);
+		#live-stats { min-height: 155px; }
+	</style>
+	<link href="../style/bootstrap/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body>
+
+<script src="../style/bootstrap/js/bootstrap.min.js"></script>
+<script src="../style/jquery-1.8.1.min.js"></script>
+<script src="../style/d3.v2.js"></script>
+<script src="../style/cubism.v1.js"></script>
+<script src="../style/highlight.min.js"></script>
+
+<h2>Live Pub/Sub Graph Demo</h2>
+<div class="row-fluid">
+	<div class="span6">
+		<div id="live-stats" class="thumbnail" style="padding: 24px; background: white; width: 440px;"></div>
+	</div>
+	<div class="span4 well">
+		<p>This demo leverages the <a href="http://size.io/developer/api/subscribe/websocket">WebSocket Event Subscriber API</a>
+		to subscribe to all events coming out of the platform.  It uses <a href="http://square.github.com/cubism/">Cubism</a>
+		and the <a href="http://d3js.org/">D3.js</a> library for document manipulation adapted to use our WebSocket data.</p>
+
+		<p>This is a Cubism <a href="http://vis.berkeley.edu/papers/horizon/">horizon graph</a> that will graph and display the 
+		events "api.get", "api.post", "api.put" and "api.delete" as well as a line that totals those four keys.</p>
+
+		<p>When events are published to the platform, the WebSocket interface receives a copy of each message and 
+		accumulates the events in order to populate the graph.</p>
+
+		<p>As each second ticks by, the chart will update itself based on data it subscribed to on the Size.IO platform.</p>
+	</div>
+</div>
+
+<script>
+
+var websocket,
+	context,
+	clientTime = 0,
+	timeDiff = 0,
+	firstWebsocketEvent,
+	timeSeries = {},
+	timeSlice = 0,
+	accessToken = '';
+
+function setTimeDiff(time) {
+	clientTime = new Date().getTime(),
+	timeDiff = clientTime - time;
+}
+
+function data(name) {
+  var value = 0,
+      values = [],
+      i = 0,
+      last;
+  return context.metric(function(start, stop, step, callback) {
+    start = +start, stop = +stop;
+    if (isNaN(last)) {
+		last = start;
+		timeSlice = (start - stop) / step;
+	}
+    while (last < stop) {
+      last += step;
+	  if (timeSeries[name]) {
+	  	value = timeSeries[name][last] ? timeSeries[name][last] : 0;
+	  } else {
+	  	value = 0;
+	  }
+      values.push(value);
+    }
+    callback(null, values = values.slice((start - stop) / step));
+  }, name);
+}
+
+function drawChart() {
+	var apiGet = data("api.get"),
+		apiPost = data("api.post"),
+		apiPut = data("api.put"),
+		apiDelete = data("api.delete");
+
+	d3.select("#live-stats").call(function(div) {
+
+	  div.append("div")
+		  .attr("class", "axis")
+		  .call(context.axis().orient("top"));
+
+	  div.selectAll(".horizon")
+		  .data([apiGet, apiPost, apiPut, apiDelete, apiGet.add(apiPost.add(apiPut.add(apiDelete)))])
+		  .enter().append("div")
+		  .attr("width", 400)
+		  .attr("class", "horizon")
+		  .call(context.horizon()
+				.height(53)
+				.format(d3.format("d"))
+				.extent([0, 200])
+			);
+
+	  div.append("div")
+		  .attr("class", "rule")
+		  .call(context.rule());
+
+	});
+
+	context.on("focus", function(i) {
+	  d3.selectAll(".value").style("right", i == null ? null : context.size() - i + "px");
+	});
+}
+
+function initialData(key) {
+	var url = "http://api.size.io/analytics/detail"
+			+ "?access_token="+ accessToken
+			+ "&jsonp=?";
+	$.getJSON(url, function(data) {
+		var key, second, temp;
+		for (var i = 0; i < data.length; i++) {
+			second = Math.floor((data[i].t + timeDiff) / 1000) * 1000;
+			if (data[i].t >= firstWebsocketEvent) {
+				continue;
+			}
+			key = data[i].k;
+			if (timeSeries[key]) {
+				if (timeSeries[key][second]) {
+					timeSeries[key][second] += data[i].v;
+				} else {
+					timeSeries[key][second] = data[i].v;
+				}
+			} else {
+				timeSeries[key] = new Object();
+				timeSeries[key][second] = data[i].v;
+			}
+		}
+		drawChart();
+	});
+}
+
+function newWebSocket() {
+	var url = "ws://api.size.io/v1.0/event/subscribe?access_token="+ accessToken;
+	console.log(url);
+	var socket = new WebSocket(url);
+	var messageParts, key, second, value;
+	socket.onopen = function(event) { }
+	socket.onmessage = function(event) {
+		message = JSON.parse(event.data);
+		if (message.y === "system" && message["server_time"]) {
+			setTimeDiff(message.server_time);
+		} else if (message.y === "system" && message["subscriber_started"]) {
+			setCubismContext();
+		}
+		if (message.y !== "event") {
+			return;
+		}
+		if (! firstWebsocketEvent) {
+			setTimeout(function() { initialData("*") }, 10);
+			firstWebsocketEvent = parseInt(message.t);
+		}
+		key = message.k;
+		time = Math.floor((parseInt(message.t) + timeDiff) / 1000) * 1000;
+		value = parseInt(message.v);
+		if (timeSeries[key]) {
+			if (timeSeries[key][time]) {
+				timeSeries[key][time] += value;
+			} else {
+				timeSeries[key][time] = value;
+			}
+		} else {
+			timeSeries[key] = new Object();
+			timeSeries[key][time] = value;
+		}
+	}
+	socket.onerror = function(event) { }
+	socket.onclose = function(event) {
+		websocket = newWebSocket();
+	}
+	return socket;
+}
+
+function cleanupTimeSeries() {
+	var trim = new Date().getTime() - 60000;
+	for (var key in timeSeries) {
+		for (var timestamp in timeSeries[key]) {
+			if (timestamp < trim) {
+				delete timeSeries[key][timestamp];
+			}
+		}
+	}
+}
+
+function setCubismContext() {
+	context = cubism.context()
+		.serverDelay(1000)
+		.clientDelay(100)
+		.step(1000)
+		.size(440);
+}
+
+$(document).ready(function() {
+	accessToken = '3a522447-ecad-5f0b-9e88-e0e9223c1320';
+	websocket = newWebSocket();
+	setInterval(function() { cleanupTimeSeries() }, 10000);
+});
+
+</script>
+</body>
+</html>
